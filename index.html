@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Train Status Checker</title>
+<style>
+  body { font-family: -apple-system, Roboto, Arial, sans-serif; max-width: 480px; margin: 24px auto; padding: 0 16px; line-height: 1.5; color: #1a1a1a; }
+  h2 { margin-bottom: 4px; }
+  .sub { color: #666; margin-top: 0; font-size: 14px; }
+  label { display: block; font-size: 13px; font-weight: 600; margin-top: 12px; margin-bottom: 4px; }
+  input { width: 100%; box-sizing: border-box; padding: 10px; font-size: 15px; border: 1px solid #ccc; border-radius: 8px; }
+  button { width: 100%; margin-top: 16px; font-size: 16px; padding: 12px; border-radius: 8px; border: none; background: #1a73e8; color: white; cursor: pointer; }
+  button:disabled { background: #999; }
+  .card { margin-top: 20px; padding: 16px; border-radius: 10px; background: #f5f6f8; display: none; }
+  .card.show { display: block; }
+  .row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #e3e3e3; font-size: 14px; }
+  .row:last-child { border-bottom: none; }
+  .row .label { color: #666; }
+  .row .value { font-weight: 600; text-align: right; }
+  .delay-ontime { color: #137333; }
+  .delay-late { color: #c5221f; }
+  .exception { margin-top: 10px; padding: 10px; background: #fef7e0; border-radius: 8px; font-size: 13px; color: #7a5b00; }
+  .error { margin-top: 16px; padding: 12px; border-radius: 8px; background: #fce8e6; color: #c5221f; display: none; font-size: 14px; }
+  .error.show { display: block; }
+  .apikey-note { font-size: 12px; color: #888; margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<h2>🚆 Train Status Checker</h2>
+<p class="sub">Enter a train number to see its live status.</p>
+
+<label for="apiKey">RailRadar API Key</label>
+<input type="password" id="apiKey" placeholder="rr_live_...">
+<p class="apikey-note">Stored only in this browser's local storage. Get a free key at railradar.in.</p>
+
+<label for="trainNumber">Train Number</label>
+<input type="text" id="trainNumber" placeholder="e.g. 12919" inputmode="numeric">
+
+<label for="startDate">Start Date (optional)</label>
+<input type="date" id="startDate">
+
+<button id="checkBtn">Check Status</button>
+
+<div class="error" id="errorBox"></div>
+
+<div class="card" id="resultCard">
+  <div class="row"><span class="label">Train</span><span class="value" id="rTrainName">-</span></div>
+  <div class="row"><span class="label">Status</span><span class="value" id="rStatus">-</span></div>
+  <div class="row"><span class="label">Current Delay</span><span class="value" id="rDelay">-</span></div>
+  <div class="row"><span class="label">Last Crossed</span><span class="value" id="rLastStation">-</span></div>
+  <div class="row"><span class="label">Next Station</span><span class="value" id="rNextStation">-</span></div>
+  <div class="row"><span class="label">Next ETA</span><span class="value" id="rNextEta">-</span></div>
+  <div class="row"><span class="label">Last Updated</span><span class="value" id="rUpdated">-</span></div>
+  <div class="exception" id="exceptionBox" style="display:none;"></div>
+</div>
+
+<script>
+const apiKeyInput = document.getElementById("apiKey");
+const trainNumberInput = document.getElementById("trainNumber");
+const startDateInput = document.getElementById("startDate");
+const checkBtn = document.getElementById("checkBtn");
+const errorBox = document.getElementById("errorBox");
+const resultCard = document.getElementById("resultCard");
+
+// ---- Restore last-used values from localStorage ----
+window.addEventListener("DOMContentLoaded", () => {
+  const savedKey = localStorage.getItem("railradar_api_key");
+  const savedTrain = localStorage.getItem("railradar_train_number");
+  const savedDate = localStorage.getItem("railradar_start_date");
+  if (savedKey) apiKeyInput.value = savedKey;
+  if (savedTrain) trainNumberInput.value = savedTrain;
+  if (savedDate) startDateInput.value = savedDate;
+});
+
+function showError(msg) {
+  errorBox.textContent = msg;
+  errorBox.classList.add("show");
+  resultCard.classList.remove("show");
+}
+
+function clearError() {
+  errorBox.classList.remove("show");
+  errorBox.textContent = "";
+}
+
+function formatTime(isoString) {
+  if (!isoString) return "-";
+  const d = new Date(isoString);
+  return d.toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+
+function computeNextEta(route, nextHalt, delayMinutes) {
+  if (!route || !nextHalt) return null;
+  const entry = route.find(r => r.stationCode === nextHalt.stationCode);
+  if (!entry || !entry.scheduledArrival) return null;
+  const scheduledMs = new Date(entry.scheduledArrival).getTime();
+  const estimatedMs = scheduledMs + (delayMinutes || 0) * 60000;
+  return new Date(estimatedMs).toISOString();
+}
+
+async function checkStatus() {
+  clearError();
+  const apiKey = apiKeyInput.value.trim();
+  const trainNumber = trainNumberInput.value.trim();
+  const startDate = startDateInput.value;
+
+  if (!apiKey) return showError("Enter your RailRadar API key.");
+  if (!trainNumber) return showError("Enter a train number.");
+
+  // Save inputs for next visit
+  localStorage.setItem("railradar_api_key", apiKey);
+  localStorage.setItem("railradar_train_number", trainNumber);
+  if (startDate) {
+    localStorage.setItem("railradar_start_date", startDate);
+  } else {
+    localStorage.removeItem("railradar_start_date");
+  }
+
+  checkBtn.disabled = true;
+  checkBtn.textContent = "Checking...";
+
+  try {
+    let url = `https://api.railradar.in/v1/trains/${encodeURIComponent(trainNumber)}/live`;
+    if (startDate) url += `?date=${startDate}`;
+
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${apiKey}` }
+    });
+    const json = await res.json();
+
+    if (!res.ok || !json.success) {
+      const msg = json?.error?.message || `Request failed (${res.status})`;
+      showError(msg);
+      return;
+    }
+
+    const d = json.data;
+    document.getElementById("rTrainName").textContent = `${d.trainNumber} - ${d.trainName}`;
+    document.getElementById("rStatus").textContent = d.status;
+
+    const delayEl = document.getElementById("rDelay");
+    const delay = d.delayMinutes ?? 0;
+    delayEl.textContent = delay > 0 ? `${delay} min late` : "On time";
+    delayEl.className = "value " + (delay > 0 ? "delay-late" : "delay-ontime");
+
+    document.getElementById("rLastStation").textContent = d.currentLocation
+      ? `${d.currentLocation.stationCode} (${d.currentLocation.status})`
+      : "-";
+
+    document.getElementById("rNextStation").textContent = d.nextHalt
+      ? `${d.nextHalt.stationName} (${d.nextHalt.stationCode})`
+      : "-";
+
+    const etaIso = computeNextEta(d.route, d.nextHalt, delay);
+    document.getElementById("rNextEta").textContent = etaIso ? formatTime(etaIso) : "-";
+
+    document.getElementById("rUpdated").textContent = formatTime(d.lastUpdatedAt);
+
+    const exceptionBox = document.getElementById("exceptionBox");
+    if (d.exceptions && d.exceptions.length > 0) {
+      exceptionBox.style.display = "block";
+      exceptionBox.textContent = "⚠️ " + d.exceptions.map(e => e.message).join(" | ");
+    } else {
+      exceptionBox.style.display = "none";
+    }
+
+    resultCard.classList.add("show");
+  } catch (err) {
+    showError("Network or parsing error: " + err.message);
+  } finally {
+    checkBtn.disabled = false;
+    checkBtn.textContent = "Check Status";
+  }
+}
+
+checkBtn.addEventListener("click", checkStatus);
+</script>
+
+</body>
+</html>
