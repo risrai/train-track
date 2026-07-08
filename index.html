@@ -91,6 +91,13 @@ function formatTime(isoString) {
   return d.toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
 }
 
+// Look up a station's full name from the route array by its code.
+function getStationNameFromRoute(route, stationCode) {
+  if (!route || !stationCode) return null;
+  const entry = route.find(r => r.stationCode === stationCode);
+  return entry ? entry.stationName : null;
+}
+
 function computeNextEta(route, nextHalt, delayMinutes) {
   if (!route || !nextHalt) return null;
   const entry = route.find(r => r.stationCode === nextHalt.stationCode);
@@ -145,9 +152,15 @@ async function checkStatus() {
     delayEl.textContent = delay > 0 ? `${delay} min late` : "On time";
     delayEl.className = "value " + (delay > 0 ? "delay-late" : "delay-ontime");
 
-    document.getElementById("rLastStation").textContent = d.currentLocation
-      ? `${d.currentLocation.stationCode} (${d.currentLocation.status})`
-      : "-";
+    // Look up the current location's station name from the route array,
+    // since currentLocation itself only has stationCode.
+    if (d.currentLocation) {
+      const stationName = getStationNameFromRoute(d.route, d.currentLocation.stationCode);
+      const namePart = stationName ? `${stationName} (${d.currentLocation.stationCode})` : d.currentLocation.stationCode;
+      document.getElementById("rLastStation").textContent = `${namePart} - ${d.currentLocation.status}`;
+    } else {
+      document.getElementById("rLastStation").textContent = "-";
+    }
 
     document.getElementById("rNextStation").textContent = d.nextHalt
       ? `${d.nextHalt.stationName} (${d.nextHalt.stationCode})`
